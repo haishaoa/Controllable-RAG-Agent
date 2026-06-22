@@ -1,6 +1,7 @@
-from langchain_openai import ChatOpenAI 
+from langchain_openai import ChatOpenAI
+
 # from langchain_groq import ChatGroq
-from langchain.vectorstores import  FAISS
+from langchain.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -15,66 +16,94 @@ from typing_extensions import TypedDict
 from typing import List, TypedDict
 
 
-
 ### Helper functions for the notebook
 from helper_functions import escape_quotes, text_wrap
 
 
-
 """
 Set the environment variables for the API keys.
+设置 API Key 所需的环境变量.
 """
 load_dotenv()
 os.environ["PYDEVD_WARN_EVALUATION_TIMEOUT"] = "100000"
-os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY')
+# sk-92ac29eb547547b589db81ee37be983c
+# os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY')
+os.environ["OPENAI_API_KEY"] = "sk-92ac29eb547547b589db81ee37be983c"
 # groq_api_key = os.getenv('GROQ_API_KEY')
-
 
 
 def create_retrievers():
     embeddings = OpenAIEmbeddings()
-    chunks_vector_store =  FAISS.load_local("chunks_vector_store", embeddings, allow_dangerous_deserialization=True)
-    chapter_summaries_vector_store =  FAISS.load_local("chapter_summaries_vector_store", embeddings, allow_dangerous_deserialization=True)
-    book_quotes_vectorstore =  FAISS.load_local("book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True)
+    chunks_vector_store = FAISS.load_local(
+        "chunks_vector_store", embeddings, allow_dangerous_deserialization=True
+    )
+    chapter_summaries_vector_store = FAISS.load_local(
+        "chapter_summaries_vector_store",
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+    book_quotes_vectorstore = FAISS.load_local(
+        "book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True
+    )
+
+    chunks_query_retriever = chunks_vector_store.as_retriever(search_kwargs={"k": 1})
+    chapter_summaries_query_retriever = chapter_summaries_vector_store.as_retriever(
+        search_kwargs={"k": 1}
+    )
+    book_quotes_query_retriever = book_quotes_vectorstore.as_retriever(
+        search_kwargs={"k": 10}
+    )
+    return (
+        chunks_query_retriever,
+        chapter_summaries_query_retriever,
+        book_quotes_query_retriever,
+    )
 
 
+(
+    chunks_query_retriever,
+    chapter_summaries_query_retriever,
+    book_quotes_query_retriever,
+) = create_retrievers()
 
-    chunks_query_retriever = chunks_vector_store.as_retriever(search_kwargs={"k": 1})     
-    chapter_summaries_query_retriever = chapter_summaries_vector_store.as_retriever(search_kwargs={"k": 1})
-    book_quotes_query_retriever = book_quotes_vectorstore.as_retriever(search_kwargs={"k": 10})
-    return chunks_query_retriever, chapter_summaries_query_retriever, book_quotes_query_retriever
-
-chunks_query_retriever, chapter_summaries_query_retriever, book_quotes_query_retriever = create_retrievers()
 
 def retrieve_context_per_question(state):
     """
     Retrieves relevant context for a given question. The context is retrieved from the book chunks and chapter summaries.
+    为给定问题检索相关上下文,上下文来自书籍分块与章节摘要.
 
     Args:
+        参数:
         state: A dictionary containing the question to answer.
+        state:包含待回答问题的状态字典.
     """
     # Retrieve relevant documents
+    # 检索相关文档
     print("Retrieving relevant chunks...")
     question = state["question"]
     docs = chunks_query_retriever.get_relevant_documents(question)
 
     # Concatenate document content
+    # 拼接文档内容
     context = " ".join(doc.page_content for doc in docs)
 
-
-
     print("Retrieving relevant chapter summaries...")
-    docs_summaries = chapter_summaries_query_retriever.get_relevant_documents(state["question"])
+    docs_summaries = chapter_summaries_query_retriever.get_relevant_documents(
+        state["question"]
+    )
 
     # Concatenate chapter summaries with citation information
+    # 拼接章节摘要并附带引用信息
     context_summaries = " ".join(
-        f"{doc.page_content} (Chapter {doc.metadata['chapter']})" for doc in docs_summaries
+        f"{doc.page_content} (Chapter {doc.metadata['chapter']})"
+        for doc in docs_summaries
     )
 
     print("Retrieving relevant book quotes...")
-    docs_book_quotes = book_quotes_query_retriever.get_relevant_documents(state["question"])
+    docs_book_quotes = book_quotes_query_retriever.get_relevant_documents(
+        state["question"]
+    )
     book_qoutes = " ".join(doc.page_content for doc in docs_book_quotes)
-
 
     all_contexts = context + context_summaries + book_qoutes
     all_contexts = escape_quotes(all_contexts)
@@ -92,41 +121,52 @@ def create_keep_only_relevant_content_chain():
     output the filtered relevant content.
     """
 
-
     class KeepRelevantContent(BaseModel):
-        relevant_content: str = Field(description="The relevant content from the retrieved documents that is relevant to the query.")
-
+        relevant_content: str = Field(
+            description="The relevant content from the retrieved documents that is relevant to the query."
+        )
 
     keep_only_relevant_content_prompt = PromptTemplate(
         template=keep_only_relevant_content_prompt_template,
         input_variables=["query", "retrieved_documents"],
     )
 
-
-    keep_only_relevant_content_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    keep_only_relevant_content_chain = keep_only_relevant_content_prompt | keep_only_relevant_content_llm.with_structured_output(KeepRelevantContent)
+    keep_only_relevant_content_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    keep_only_relevant_content_chain = (
+        keep_only_relevant_content_prompt
+        | keep_only_relevant_content_llm.with_structured_output(KeepRelevantContent)
+    )
     return keep_only_relevant_content_chain
 
+
 keep_only_relevant_content_chain = create_keep_only_relevant_content_chain()
+
+
 def keep_only_relevant_content(state):
     """
     Keeps only the relevant content from the retrieved documents that is relevant to the query.
+    仅保留检索文档中与查询相关的内容.
 
     Args:
+        参数:
         question: The query question.
+        question:查询问题.
         context: The retrieved documents.
+        context:检索得到的文档内容.
         chain: The LLMChain instance.
+        chain:LLMChain 实例.
 
     Returns:
+        返回:
         The relevant content from the retrieved documents that is relevant to the query.
+        从检索文档中过滤后的相关内容.
     """
     question = state["question"]
     context = state["context"]
 
-    input_data = {
-    "query": question,
-    "retrieved_documents": context
-}
+    input_data = {"query": question, "retrieved_documents": context}
     print("keeping only the relevant content...")
     pprint("--------------------")
     output = keep_only_relevant_content_chain.invoke(input_data)
@@ -134,15 +174,22 @@ def keep_only_relevant_content(state):
     relevant_content = "".join(relevant_content)
     relevant_content = escape_quotes(relevant_content)
 
-    return {"relevant_context": relevant_content, "context": context, "question": question}
+    return {
+        "relevant_context": relevant_content,
+        "context": context,
+        "question": question,
+    }
 
 
 def create_question_answer_from_context_cot_chain():
     class QuestionAnswerFromContext(BaseModel):
-        answer_based_on_content: str = Field(description="generates an answer to a query based on a given context.")
+        answer_based_on_content: str = Field(
+            description="generates an answer to a query based on a given context."
+        )
 
-    question_answer_from_context_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-
+    question_answer_from_context_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
 
     question_answer_cot_prompt_template = """ 
     Examples of Chain-of-Thought Reasoning
@@ -192,38 +239,51 @@ def create_question_answer_from_context_cot_chain():
         template=question_answer_cot_prompt_template,
         input_variables=["context", "question"],
     )
-    question_answer_from_context_cot_chain = question_answer_from_context_cot_prompt | question_answer_from_context_llm.with_structured_output(QuestionAnswerFromContext)
+    question_answer_from_context_cot_chain = (
+        question_answer_from_context_cot_prompt
+        | question_answer_from_context_llm.with_structured_output(
+            QuestionAnswerFromContext
+        )
+    )
     return question_answer_from_context_cot_chain
 
+
 question_answer_from_context_cot_chain = create_question_answer_from_context_cot_chain()
+
 
 def answer_question_from_context(state):
     """
     Answers a question from a given context.
+    基于给定上下文回答问题.
 
     Args:
+        参数:
         question: The query question.
+        question:查询问题.
         context: The context to answer the question from.
+        context:用于回答问题的上下文.
         chain: The LLMChain instance.
+        chain:LLMChain 实例.
 
     Returns:
+        返回:
         The answer to the question from the context.
+        基于上下文生成的问题答案.
     """
     question = state["question"]
-    context = state["aggregated_context"] if "aggregated_context" in state else state["context"]
+    context = (
+        state["aggregated_context"]
+        if "aggregated_context" in state
+        else state["context"]
+    )
 
-    input_data = {
-    "question": question,
-    "context": context
-}
+    input_data = {"question": question, "context": context}
     print("Answering the question from the retrieved context...")
 
     output = question_answer_from_context_cot_chain.invoke(input_data)
     answer = output.answer_based_on_content
-    print(f'answer before checking hallucination: {answer}')
+    print(f"answer before checking hallucination: {answer}")
     return {"answer": answer, "context": context, "question": question}
-
-
 
 
 def create_is_relevant_content_chain():
@@ -232,8 +292,12 @@ def create_is_relevant_content_chain():
     You need to determine if the document is relevant to the query. """
 
     class Relevance(BaseModel):
-        is_relevant: bool = Field(description="Whether the document is relevant to the query.")
-        explanation: str = Field(description="An explanation of why the document is relevant or not.")
+        is_relevant: bool = Field(
+            description="Whether the document is relevant to the query."
+        )
+        explanation: str = Field(
+            description="An explanation of why the document is relevant or not."
+        )
 
     # is_relevant_json_parser = JsonOutputParser(pydantic_object=Relevance)
     # is_relevant_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
@@ -244,29 +308,35 @@ def create_is_relevant_content_chain():
         input_variables=["query", "context"],
         # partial_variables={"format_instructions": is_relevant_json_parser.get_format_instructions()},
     )
-    is_relevant_content_chain = is_relevant_content_prompt | is_relevant_llm.with_structured_output(Relevance)
+    is_relevant_content_chain = (
+        is_relevant_content_prompt | is_relevant_llm.with_structured_output(Relevance)
+    )
     return is_relevant_content_chain
 
+
 is_relevant_content_chain = create_is_relevant_content_chain()
+
 
 def is_relevant_content(state):
     """
     Determines if the document is relevant to the query.
+    判断文档是否与查询相关.
 
     Args:
+        参数:
         question: The query question.
+        question:查询问题.
         context: The context to determine relevance.
+        context:用于判断相关性的上下文.
     """
 
     question = state["question"]
     context = state["context"]
 
-    input_data = {
-    "query": question,
-    "context": context
-}
+    input_data = {"query": question, "context": context}
 
     # Invoke the chain to determine if the document is relevant
+    # 调用链判断文档是否相关
     output = is_relevant_content_chain.invoke(input_data)
     print("Determining if the document is relevant...")
     if output["is_relevant"] == True:
@@ -281,10 +351,16 @@ def create_is_grounded_on_facts_chain():
     class is_grounded_on_facts(BaseModel):
         """
         Output schema for the rewritten question.
+        重写问题的输出结构定义.
         """
-        grounded_on_facts: bool = Field(description="Answer is grounded in the facts, 'yes' or 'no'")
 
-    is_grounded_on_facts_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+        grounded_on_facts: bool = Field(
+            description="Answer is grounded in the facts, 'yes' or 'no'"
+        )
+
+    is_grounded_on_facts_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
     is_grounded_on_facts_prompt_template = """You are a fact-checker that determines if the given answer {answer} is grounded in the given context {context}
     you don't mind if it doesn't make sense, as long as it is grounded in the context.
     output a json containing the answer to the question, and appart from the json format don't output any additional text.
@@ -294,7 +370,10 @@ def create_is_grounded_on_facts_chain():
         template=is_grounded_on_facts_prompt_template,
         input_variables=["context", "answer"],
     )
-    is_grounded_on_facts_chain = is_grounded_on_facts_prompt | is_grounded_on_facts_llm.with_structured_output(is_grounded_on_facts)
+    is_grounded_on_facts_chain = (
+        is_grounded_on_facts_prompt
+        | is_grounded_on_facts_llm.with_structured_output(is_grounded_on_facts)
+    )
     return is_grounded_on_facts_chain
 
 
@@ -303,20 +382,29 @@ def create_can_be_answered_chain():
     You need to determine if the question can be fully answered based on the context."""
 
     class QuestionAnswer(BaseModel):
-        can_be_answered: bool = Field(description="binary result of whether the question can be fully answered or not")
-        explanation: str = Field(description="An explanation of why the question can be fully answered or not.")
+        can_be_answered: bool = Field(
+            description="binary result of whether the question can be fully answered or not"
+        )
+        explanation: str = Field(
+            description="An explanation of why the question can be fully answered or not."
+        )
 
     # can_be_answered_json_parser = JsonOutputParser(pydantic_object=QuestionAnswer)
 
     answer_question_prompt = PromptTemplate(
         template=can_be_answered_prompt_template,
-        input_variables=["question","context"],
+        input_variables=["question", "context"],
         # partial_variables={"format_instructions": can_be_answered_json_parser.get_format_instructions()},
     )
 
     # can_be_answered_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
-    can_be_answered_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    can_be_answered_chain = answer_question_prompt | can_be_answered_llm.with_structured_output(QuestionAnswer)
+    can_be_answered_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    can_be_answered_chain = (
+        answer_question_prompt
+        | can_be_answered_llm.with_structured_output(QuestionAnswer)
+    )
     return can_be_answered_chain
 
 
@@ -325,11 +413,14 @@ def create_is_distilled_content_grounded_on_content_chain():
         you need to determine if the distilled content is grounded on the original context.
         if the distilled content is grounded on the original context, set the grounded field to true.
         if the distilled content is not grounded on the original context, set the grounded field to false."""
-    
 
     class IsDistilledContentGroundedOnContent(BaseModel):
-        grounded: bool = Field(description="Whether the distilled content is grounded on the original context.")
-        explanation: str = Field(description="An explanation of why the distilled content is or is not grounded on the original context.")
+        grounded: bool = Field(
+            description="Whether the distilled content is grounded on the original context."
+        )
+        explanation: str = Field(
+            description="An explanation of why the distilled content is or is not grounded on the original context."
+        )
 
     # is_distilled_content_grounded_on_content_json_parser = JsonOutputParser(pydantic_object=IsDistilledContentGroundedOnContent)
 
@@ -340,25 +431,42 @@ def create_is_distilled_content_grounded_on_content_chain():
     )
 
     # is_distilled_content_grounded_on_content_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
-    is_distilled_content_grounded_on_content_llm =ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+    is_distilled_content_grounded_on_content_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
 
-    is_distilled_content_grounded_on_content_chain = is_distilled_content_grounded_on_content_prompt | is_distilled_content_grounded_on_content_llm.with_structured_output(IsDistilledContentGroundedOnContent)
+    is_distilled_content_grounded_on_content_chain = (
+        is_distilled_content_grounded_on_content_prompt
+        | is_distilled_content_grounded_on_content_llm.with_structured_output(
+            IsDistilledContentGroundedOnContent
+        )
+    )
     return is_distilled_content_grounded_on_content_chain
 
-is_distilled_content_grounded_on_content_chain = create_is_distilled_content_grounded_on_content_chain()
+
+is_distilled_content_grounded_on_content_chain = (
+    create_is_distilled_content_grounded_on_content_chain()
+)
+
 
 def is_distilled_content_grounded_on_content(state):
     pprint("--------------------")
 
     """
     Determines if the distilled content is grounded on the original context.
+    判断提炼后的内容是否基于原始上下文.
 
     Args:
+        参数:
         distilled_content: The distilled content.
+        distilled_content:提炼后的内容.
         original_context: The original context.
+        original_context:原始上下文.
 
     Returns:
+        返回:
         Whether the distilled content is grounded on the original context.
+        提炼内容是否建立在原始上下文之上.
     """
 
     print("Determining if the distilled content is grounded on the original context...")
@@ -367,7 +475,7 @@ def is_distilled_content_grounded_on_content(state):
 
     input_data = {
         "distilled_content": distilled_content,
-        "original_context": original_context
+        "original_context": original_context,
     }
 
     output = is_distilled_content_grounded_on_content_chain.invoke(input_data)
@@ -379,54 +487,67 @@ def is_distilled_content_grounded_on_content(state):
     else:
         print("The distilled content is not grounded on the original context.")
         return "not grounded on the original context"
-    
+
 
 def retrieve_chunks_context_per_question(state):
     """
     Retrieves relevant context for a given question. The context is retrieved from the book chunks and chapter summaries.
+    为给定问题检索相关上下文,上下文来自书籍分块与章节摘要.
 
     Args:
+        参数:
         state: A dictionary containing the question to answer.
+        state:包含待回答问题的状态字典.
     """
     # Retrieve relevant documents
+    # 检索相关文档
     print("Retrieving relevant chunks...")
     question = state["question"]
     docs = chunks_query_retriever.get_relevant_documents(question)
 
     # Concatenate document content
+    # 拼接文档内容
     context = " ".join(doc.page_content for doc in docs)
     context = escape_quotes(context)
     return {"context": context, "question": question}
+
 
 def retrieve_summaries_context_per_question(state):
 
     print("Retrieving relevant chapter summaries...")
     question = state["question"]
 
-    docs_summaries = chapter_summaries_query_retriever.get_relevant_documents(state["question"])
+    docs_summaries = chapter_summaries_query_retriever.get_relevant_documents(
+        state["question"]
+    )
 
     # Concatenate chapter summaries with citation information
+    # 拼接章节摘要并附带引用信息
     context_summaries = " ".join(
-        f"{doc.page_content} (Chapter {doc.metadata['chapter']})" for doc in docs_summaries
+        f"{doc.page_content} (Chapter {doc.metadata['chapter']})"
+        for doc in docs_summaries
     )
     context_summaries = escape_quotes(context_summaries)
     return {"context": context_summaries, "question": question}
+
 
 def retrieve_book_quotes_context_per_question(state):
     question = state["question"]
 
     print("Retrieving relevant book quotes...")
-    docs_book_quotes = book_quotes_query_retriever.get_relevant_documents(state["question"])
+    docs_book_quotes = book_quotes_query_retriever.get_relevant_documents(
+        state["question"]
+    )
     book_qoutes = " ".join(doc.page_content for doc in docs_book_quotes)
     book_qoutes_context = escape_quotes(book_qoutes)
 
     return {"context": book_qoutes_context, "question": question}
 
 
-
 class QualitativeRetrievalGraphState(TypedDict):
     """
     Represents the state of our graph.
+    表示当前图工作流的状态结构.
     """
 
     question: str
@@ -438,87 +559,136 @@ def create_qualitative_retrieval_book_chunks_workflow_app():
     qualitative_chunks_retrieval_workflow = StateGraph(QualitativeRetrievalGraphState)
 
     # Define the nodes
-    qualitative_chunks_retrieval_workflow.add_node("retrieve_chunks_context_per_question",retrieve_chunks_context_per_question)
-    qualitative_chunks_retrieval_workflow.add_node("keep_only_relevant_content",keep_only_relevant_content)
+    # 定义节点
+    qualitative_chunks_retrieval_workflow.add_node(
+        "retrieve_chunks_context_per_question", retrieve_chunks_context_per_question
+    )
+    qualitative_chunks_retrieval_workflow.add_node(
+        "keep_only_relevant_content", keep_only_relevant_content
+    )
 
     # Build the graph
-    qualitative_chunks_retrieval_workflow.set_entry_point("retrieve_chunks_context_per_question")
+    # 构建图
+    qualitative_chunks_retrieval_workflow.set_entry_point(
+        "retrieve_chunks_context_per_question"
+    )
 
-    qualitative_chunks_retrieval_workflow.add_edge("retrieve_chunks_context_per_question", "keep_only_relevant_content")
+    qualitative_chunks_retrieval_workflow.add_edge(
+        "retrieve_chunks_context_per_question", "keep_only_relevant_content"
+    )
 
     qualitative_chunks_retrieval_workflow.add_conditional_edges(
         "keep_only_relevant_content",
         is_distilled_content_grounded_on_content,
-        {"grounded on the original context":END,
-        "not grounded on the original context":"keep_only_relevant_content"},
-        )
+        {
+            "grounded on the original context": END,
+            "not grounded on the original context": "keep_only_relevant_content",
+        },
+    )
 
-    
-    qualitative_chunks_retrieval_workflow_app = qualitative_chunks_retrieval_workflow.compile()
+    qualitative_chunks_retrieval_workflow_app = (
+        qualitative_chunks_retrieval_workflow.compile()
+    )
     return qualitative_chunks_retrieval_workflow_app
 
 
 def create_qualitative_retrieval_chapter_summaries_workflow_app():
-    qualitative_summaries_retrieval_workflow = StateGraph(QualitativeRetrievalGraphState)
+    qualitative_summaries_retrieval_workflow = StateGraph(
+        QualitativeRetrievalGraphState
+    )
 
     # Define the nodes
-    qualitative_summaries_retrieval_workflow.add_node("retrieve_summaries_context_per_question",retrieve_summaries_context_per_question)
-    qualitative_summaries_retrieval_workflow.add_node("keep_only_relevant_content",keep_only_relevant_content)
+    # 定义节点
+    qualitative_summaries_retrieval_workflow.add_node(
+        "retrieve_summaries_context_per_question",
+        retrieve_summaries_context_per_question,
+    )
+    qualitative_summaries_retrieval_workflow.add_node(
+        "keep_only_relevant_content", keep_only_relevant_content
+    )
 
     # Build the graph
-    qualitative_summaries_retrieval_workflow.set_entry_point("retrieve_summaries_context_per_question")
+    # 构建图
+    qualitative_summaries_retrieval_workflow.set_entry_point(
+        "retrieve_summaries_context_per_question"
+    )
 
-    qualitative_summaries_retrieval_workflow.add_edge("retrieve_summaries_context_per_question", "keep_only_relevant_content")
+    qualitative_summaries_retrieval_workflow.add_edge(
+        "retrieve_summaries_context_per_question", "keep_only_relevant_content"
+    )
 
     qualitative_summaries_retrieval_workflow.add_conditional_edges(
         "keep_only_relevant_content",
         is_distilled_content_grounded_on_content,
-        {"grounded on the original context":END,
-        "not grounded on the original context":"keep_only_relevant_content"},
-        )
+        {
+            "grounded on the original context": END,
+            "not grounded on the original context": "keep_only_relevant_content",
+        },
+    )
 
-
-    qualitative_summaries_retrieval_workflow_app = qualitative_summaries_retrieval_workflow.compile()
+    qualitative_summaries_retrieval_workflow_app = (
+        qualitative_summaries_retrieval_workflow.compile()
+    )
     return qualitative_summaries_retrieval_workflow_app
 
 
 def create_qualitative_book_quotes_retrieval_workflow_app():
-    qualitative_book_quotes_retrieval_workflow = StateGraph(QualitativeRetrievalGraphState)
+    qualitative_book_quotes_retrieval_workflow = StateGraph(
+        QualitativeRetrievalGraphState
+    )
 
     # Define the nodes
-    qualitative_book_quotes_retrieval_workflow.add_node("retrieve_book_quotes_context_per_question",retrieve_book_quotes_context_per_question)
-    qualitative_book_quotes_retrieval_workflow.add_node("keep_only_relevant_content",keep_only_relevant_content)
+    # 定义节点
+    qualitative_book_quotes_retrieval_workflow.add_node(
+        "retrieve_book_quotes_context_per_question",
+        retrieve_book_quotes_context_per_question,
+    )
+    qualitative_book_quotes_retrieval_workflow.add_node(
+        "keep_only_relevant_content", keep_only_relevant_content
+    )
 
     # Build the graph
-    qualitative_book_quotes_retrieval_workflow.set_entry_point("retrieve_book_quotes_context_per_question")
+    # 构建图
+    qualitative_book_quotes_retrieval_workflow.set_entry_point(
+        "retrieve_book_quotes_context_per_question"
+    )
 
-    qualitative_book_quotes_retrieval_workflow.add_edge("retrieve_book_quotes_context_per_question", "keep_only_relevant_content")
+    qualitative_book_quotes_retrieval_workflow.add_edge(
+        "retrieve_book_quotes_context_per_question", "keep_only_relevant_content"
+    )
 
     qualitative_book_quotes_retrieval_workflow.add_conditional_edges(
         "keep_only_relevant_content",
         is_distilled_content_grounded_on_content,
-        {"grounded on the original context":END,
-        "not grounded on the original context":"keep_only_relevant_content"},
-        )
+        {
+            "grounded on the original context": END,
+            "not grounded on the original context": "keep_only_relevant_content",
+        },
+    )
 
-    qualitative_book_quotes_retrieval_workflow_app = qualitative_book_quotes_retrieval_workflow.compile()
+    qualitative_book_quotes_retrieval_workflow_app = (
+        qualitative_book_quotes_retrieval_workflow.compile()
+    )
 
     return qualitative_book_quotes_retrieval_workflow_app
 
 
-
 is_grounded_on_facts_chain = create_is_grounded_on_facts_chain()
+
 
 def is_answer_grounded_on_context(state):
     """Determines if the answer to the question is grounded in the facts.
-    
+    判断问题答案是否基于事实.
+
     Args:
+        参数:
         state: A dictionary containing the context and answer.
+        state:包含上下文与答案的状态字典.
     """
     print("Checking if the answer is grounded in the facts...")
     context = state["context"]
     answer = state["answer"]
-    
+
     result = is_grounded_on_facts_chain.invoke({"context": context, "answer": answer})
     grounded_on_facts = result.grounded_on_facts
     if not grounded_on_facts:
@@ -533,6 +703,7 @@ def create_qualitative_answer_workflow_app():
     class QualitativeAnswerGraphState(TypedDict):
         """
         Represents the state of our graph.
+        表示当前图工作流的状态结构.
 
         """
 
@@ -543,15 +714,20 @@ def create_qualitative_answer_workflow_app():
     qualitative_answer_workflow = StateGraph(QualitativeAnswerGraphState)
 
     # Define the nodes
+    # 定义节点
 
-    qualitative_answer_workflow.add_node("answer_question_from_context",answer_question_from_context)
+    qualitative_answer_workflow.add_node(
+        "answer_question_from_context", answer_question_from_context
+    )
 
     # Build the graph
+    # 构建图
     qualitative_answer_workflow.set_entry_point("answer_question_from_context")
 
     qualitative_answer_workflow.add_conditional_edges(
-    "answer_question_from_context",is_answer_grounded_on_context ,{"hallucination":"answer_question_from_context", "grounded on context":END}
-
+        "answer_question_from_context",
+        is_answer_grounded_on_context,
+        {"hallucination": "answer_question_from_context", "grounded on context": END},
     )
 
     qualitative_answer_workflow_app = qualitative_answer_workflow.compile()
@@ -565,24 +741,25 @@ class PlanExecute(TypedDict):
     query_to_retrieve_or_answer: str
     plan: List[str]
     past_steps: List[str]
-    mapping: dict 
+    mapping: dict
     curr_context: str
     aggregated_context: str
     tool: str
     response: str
 
-class Plan(BaseModel):
-        """Plan to follow in future"""
 
-        steps: List[str] = Field(
-            description="different steps to follow, should be in sorted order"
-        )
+class Plan(BaseModel):
+    """Plan to follow in future
+    未来要执行的计划."""
+
+    steps: List[str] = Field(
+        description="different steps to follow, should be in sorted order"
+    )
 
 
 def create_plan_chain():
-    
 
-    planner_prompt =""" For the given query {question}, come up with a simple step by step plan of how to figure out the answer. 
+    planner_prompt = """ For the given query {question}, come up with a simple step by step plan of how to figure out the answer. 
 
     This plan should involve individual tasks, that if executed correctly will yield the correct answer. Do not add any superfluous steps. 
     The result of the final step should be the final answer. Make sure that each step has all the information needed - do not skip steps.
@@ -591,8 +768,8 @@ def create_plan_chain():
 
     planner_prompt = PromptTemplate(
         template=planner_prompt,
-        input_variables=["question"], 
-        )
+        input_variables=["question"],
+    )
 
     planner_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
 
@@ -619,22 +796,26 @@ def create_break_down_plan_chain():
         input_variables=["plan"],
     )
 
-    break_down_plan_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+    break_down_plan_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
 
-    break_down_plan_chain = break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
+    break_down_plan_chain = (
+        break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
+    )
 
     return break_down_plan_chain
+
 
 def create_replanner_chain():
     # class ActPossibleResults(BaseModel):
     #     """Possible results of the action."""
     #     plan: Plan = Field(description="Plan to follow in future.")
     #     explanation: str = Field(description="Explanation of the action.")
-        
 
     # act_possible_results_parser = JsonOutputParser(pydantic_object=ActPossibleResults)
 
-    replanner_prompt_template =""" For the given objective, come up with a simple step by step plan of how to figure out the answer. 
+    replanner_prompt_template = """ For the given objective, come up with a simple step by step plan of how to figure out the answer. 
     This plan should involve individual tasks, that if executed correctly will yield the correct answer. Do not add any superfluous steps. 
     The result of the final step should be the final answer. Make sure that each step has all the information needed - do not skip steps.
 
@@ -667,10 +848,9 @@ def create_replanner_chain():
 
     replanner_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
 
-
-
     replanner = replanner_prompt | replanner_llm.with_structured_output(Plan)
     return replanner
+
 
 def create_task_handler_chain():
     tasks_handler_prompt_template = """You are a task handler that receives a task {curr_task} and have to decide with tool to use to execute the task.
@@ -695,30 +875,48 @@ def create_task_handler_chain():
     """
 
     class TaskHandlerOutput(BaseModel):
-        """Output schema for the task handler."""
-        query: str = Field(description="The query to be either retrieved from the vector store, or the question that should be answered from context.")
-        curr_context: str = Field(description="The context to be based on in order to answer the query.")
-        tool: str = Field(description="The tool to be used should be either retrieve_chunks, retrieve_summaries, retrieve_quotes, or answer_from_context.")
+        """Output schema for the task handler.
+        任务处理器的输出结构."""
 
+        query: str = Field(
+            description="The query to be either retrieved from the vector store, or the question that should be answered from context."
+        )
+        curr_context: str = Field(
+            description="The context to be based on in order to answer the query."
+        )
+        tool: str = Field(
+            description="The tool to be used should be either retrieve_chunks, retrieve_summaries, retrieve_quotes, or answer_from_context."
+        )
 
     task_handler_prompt = PromptTemplate(
         template=tasks_handler_prompt_template,
-        input_variables=["curr_task", "aggregated_context", "last_tool" "past_steps", "question"],
+        input_variables=[
+            "curr_task",
+            "aggregated_context",
+            "last_tool" "past_steps",
+            "question",
+        ],
     )
 
     task_handler_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(TaskHandlerOutput)
+    task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(
+        TaskHandlerOutput
+    )
     return task_handler_chain
+
 
 def create_anonymize_question_chain():
     class AnonymizeQuestion(BaseModel):
-        """Anonymized question and mapping."""
-        anonymized_question : str = Field(description="Anonymized question.")
-        mapping: dict = Field(description="Mapping of original name entities to variables.")
+        """Anonymized question and mapping.
+        匿名化问题及其映射关系."""
+
+        anonymized_question: str = Field(description="Anonymized question.")
+        mapping: dict = Field(
+            description="Mapping of original name entities to variables."
+        )
         explanation: str = Field(description="Explanation of the action.")
 
     anonymize_question_parser = JsonOutputParser(pydantic_object=AnonymizeQuestion)
-
 
     anonymize_question_prompt_template = """ You are a question anonymizer. The input You receive is a string containing several words that
     construct a question {question}. Your goal is to changes all name entities in the input to variables, and remember the mapping of the original name entities to the variables.
@@ -731,44 +929,60 @@ def create_anonymize_question_chain():
     output the anonymized question and the mapping as two separate fields in a json format as described here, without any additional text apart from the json format.
    """
 
-
-
     anonymize_question_prompt = PromptTemplate(
         template=anonymize_question_prompt_template,
         input_variables=["question"],
-        partial_variables={"format_instructions": anonymize_question_parser.get_format_instructions()},
+        partial_variables={
+            "format_instructions": anonymize_question_parser.get_format_instructions()
+        },
     )
 
-    anonymize_question_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    anonymize_question_chain = anonymize_question_prompt | anonymize_question_llm | anonymize_question_parser
+    anonymize_question_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    anonymize_question_chain = (
+        anonymize_question_prompt | anonymize_question_llm | anonymize_question_parser
+    )
     return anonymize_question_chain
 
 
 def create_deanonymize_plan_chain():
     class DeAnonymizePlan(BaseModel):
-        """Possible results of the action."""
-        plan: List = Field(description="Plan to follow in future. with all the variables replaced with the mapped words.")
+        """Possible results of the action.
+        该动作可能产生的结果."""
 
+        plan: List = Field(
+            description="Plan to follow in future. with all the variables replaced with the mapped words."
+        )
 
     de_anonymize_plan_prompt_template = """ you receive a list of tasks: {plan}, where some of the words are replaced with mapped variables. you also receive
     the mapping for those variables to words {mapping}. replace all the variables in the list of tasks with the mapped words. if no variables are present,
     return the original list of tasks. in any case, just output the updated list of tasks in a json format as described here, without any additional text apart from the
     """
 
-
     de_anonymize_plan_prompt = PromptTemplate(
         template=de_anonymize_plan_prompt_template,
         input_variables=["plan", "mapping"],
     )
 
-    de_anonymize_plan_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    de_anonymize_plan_chain = de_anonymize_plan_prompt | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan)
+    de_anonymize_plan_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    de_anonymize_plan_chain = (
+        de_anonymize_plan_prompt
+        | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan)
+    )
     return de_anonymize_plan_chain
+
 
 def create_can_be_answered_already_chain():
     class CanBeAnsweredAlready(BaseModel):
-        """Possible results of the action."""
-        can_be_answered: bool = Field(description="Whether the question can be fully answered or not based on the given context.")
+        """Possible results of the action.
+        该动作可能产生的结果."""
+
+        can_be_answered: bool = Field(
+            description="Whether the question can be fully answered or not based on the given context."
+        )
 
     can_be_answered_already_prompt_template = """You receive a query: {question} and a context: {context}.
     You need to determine if the question can be fully answered relying only the given context.
@@ -779,18 +993,29 @@ def create_can_be_answered_already_chain():
 
     can_be_answered_already_prompt = PromptTemplate(
         template=can_be_answered_already_prompt_template,
-        input_variables=["question","context"],
+        input_variables=["question", "context"],
     )
 
-    can_be_answered_already_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
-    can_be_answered_already_chain = can_be_answered_already_prompt | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready)
+    can_be_answered_already_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    can_be_answered_already_chain = (
+        can_be_answered_already_prompt
+        | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready)
+    )
     return can_be_answered_already_chain
 
 
 task_handler_chain = create_task_handler_chain()
-qualitative_chunks_retrieval_workflow_app = create_qualitative_retrieval_book_chunks_workflow_app()
-qualitative_summaries_retrieval_workflow_app = create_qualitative_retrieval_chapter_summaries_workflow_app()
-qualitative_book_quotes_retrieval_workflow_app = create_qualitative_book_quotes_retrieval_workflow_app()
+qualitative_chunks_retrieval_workflow_app = (
+    create_qualitative_retrieval_book_chunks_workflow_app()
+)
+qualitative_summaries_retrieval_workflow_app = (
+    create_qualitative_retrieval_chapter_summaries_workflow_app()
+)
+qualitative_book_quotes_retrieval_workflow_app = (
+    create_qualitative_book_quotes_retrieval_workflow_app()
+)
 qualitative_answer_workflow_app = create_qualitative_answer_workflow_app()
 de_anonymize_plan_chain = create_deanonymize_plan_chain()
 planner = create_plan_chain()
@@ -801,62 +1026,74 @@ can_be_answered_already_chain = create_can_be_answered_already_chain()
 
 
 def run_task_handler_chain(state: PlanExecute):
-    """ Run the task handler chain to decide which tool to use to execute the task.
+    """Run the task handler chain to decide which tool to use to execute the task.
+    运行任务处理链,决定执行当前任务应使用的工具.
     Args:
+       参数:
        state: The current state of the plan execution.
+       state:计划执行的当前状态.
     Returns:
+       返回:
        The updated state of the plan execution.
+       更新后的计划执行状态.
     """
     state["curr_state"] = "task_handler"
     print("the current plan is:")
     print(state["plan"])
-    pprint("--------------------") 
+    pprint("--------------------")
 
-    if not state['past_steps']:
+    if not state["past_steps"]:
         state["past_steps"] = []
 
     curr_task = state["plan"][0]
 
-    inputs = {"curr_task": curr_task,
-               "aggregated_context": state["aggregated_context"],
-                "last_tool": state["tool"],
-                "past_steps": state["past_steps"],
-                "question": state["question"]}
-    
+    inputs = {
+        "curr_task": curr_task,
+        "aggregated_context": state["aggregated_context"],
+        "last_tool": state["tool"],
+        "past_steps": state["past_steps"],
+        "question": state["question"],
+    }
+
     output = task_handler_chain.invoke(inputs)
-  
+
     state["past_steps"].append(curr_task)
     state["plan"].pop(0)
 
     if output.tool == "retrieve_chunks":
         state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_chunks"
-    
+        state["tool"] = "retrieve_chunks"
+
     elif output.tool == "retrieve_summaries":
         state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_summaries"
+        state["tool"] = "retrieve_summaries"
 
     elif output.tool == "retrieve_quotes":
         state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_quotes"
+        state["tool"] = "retrieve_quotes"
 
-    
     elif output.tool == "answer_from_context":
         state["query_to_retrieve_or_answer"] = output.query
         state["curr_context"] = output.curr_context
-        state["tool"]="answer"
+        state["tool"] = "answer"
     else:
-        raise ValueError("Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'")
-    return state  
-
+        raise ValueError(
+            "Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'"
+        )
+    return state
 
 
 def retrieve_or_answer(state: PlanExecute):
     """Decide whether to retrieve or answer the question based on the current state.
+    基于当前状态决定执行检索还是回答.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         updates the tool to use .
+        更新后要使用的工具标识.
     """
     state["curr_state"] = "decide_tool"
     print("deciding whether to retrieve or answer")
@@ -869,17 +1106,23 @@ def retrieve_or_answer(state: PlanExecute):
     elif state["tool"] == "answer":
         return "chosen_tool_is_answer"
     else:
-        raise ValueError("Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'")  
-
+        raise ValueError(
+            "Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'"
+        )
 
 
 def run_qualitative_chunks_retrieval_workflow(state):
     """
     Run the qualitative chunks retrieval workflow.
+    运行定性分块检索工作流.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The state with the updated aggregated context.
+        包含更新后聚合上下文的状态.
     """
     state["curr_state"] = "retrieve_chunks"
     print("Running the qualitative chunks retrieval workflow...")
@@ -887,20 +1130,26 @@ def run_qualitative_chunks_retrieval_workflow(state):
     inputs = {"question": question}
     for output in qualitative_chunks_retrieval_workflow_app.stream(inputs):
         for _, _ in output.items():
-            pass 
+            pass
         pprint("--------------------")
     if not state["aggregated_context"]:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
+    state["aggregated_context"] += output["relevant_context"]
     return state
+
 
 def run_qualitative_summaries_retrieval_workflow(state):
     """
     Run the qualitative summaries retrieval workflow.
+    运行定性摘要检索工作流.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The state with the updated aggregated context.
+        包含更新后聚合上下文的状态.
     """
     state["curr_state"] = "retrieve_summaries"
     print("Running the qualitative summaries retrieval workflow...")
@@ -908,20 +1157,26 @@ def run_qualitative_summaries_retrieval_workflow(state):
     inputs = {"question": question}
     for output in qualitative_summaries_retrieval_workflow_app.stream(inputs):
         for _, _ in output.items():
-            pass 
+            pass
         pprint("--------------------")
     if not state["aggregated_context"]:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
+    state["aggregated_context"] += output["relevant_context"]
     return state
+
 
 def run_qualitative_book_quotes_retrieval_workflow(state):
     """
     Run the qualitative book quotes retrieval workflow.
+    运行定性书摘检索工作流.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The state with the updated aggregated context.
+        包含更新后聚合上下文的状态.
     """
     state["curr_state"] = "retrieve_book_quotes"
     print("Running the qualitative book quotes retrieval workflow...")
@@ -929,22 +1184,26 @@ def run_qualitative_book_quotes_retrieval_workflow(state):
     inputs = {"question": question}
     for output in qualitative_book_quotes_retrieval_workflow_app.stream(inputs):
         for _, _ in output.items():
-            pass 
+            pass
         pprint("--------------------")
     if not state["aggregated_context"]:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
+    state["aggregated_context"] += output["relevant_context"]
     return state
-   
 
 
 def run_qualtative_answer_workflow(state):
     """
     Run the qualitative answer workflow.
+    运行定性回答工作流.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The state with the updated aggregated context.
+        包含更新后聚合内容的状态.
     """
     state["curr_state"] = "answer"
     print("Running the qualitative answer workflow...")
@@ -953,20 +1212,26 @@ def run_qualtative_answer_workflow(state):
     inputs = {"question": question, "context": context}
     for output in qualitative_answer_workflow_app.stream(inputs):
         for _, _ in output.items():
-            pass 
+            pass
         pprint("--------------------")
     if not state["aggregated_context"]:
         state["aggregated_context"] = ""
     state["aggregated_context"] += output["answer"]
     return state
 
+
 def run_qualtative_answer_workflow_for_final_answer(state):
     """
     Run the qualitative answer workflow for the final answer.
+    运行用于生成最终答案的定性回答工作流.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The state with the updated response.
+        包含更新后响应结果的状态.
     """
     state["curr_state"] = "get_final_answer"
     print("Running the qualitative answer workflow for final answer...")
@@ -975,7 +1240,7 @@ def run_qualtative_answer_workflow_for_final_answer(state):
     inputs = {"question": question, "context": context}
     for output in qualitative_answer_workflow_app.stream(inputs):
         for _, value in output.items():
-            pass  
+            pass
         pprint("--------------------")
     state["response"] = value
     return state
@@ -984,20 +1249,25 @@ def run_qualtative_answer_workflow_for_final_answer(state):
 def anonymize_queries(state: PlanExecute):
     """
     Anonymizes the question.
+    对问题进行匿名化处理.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The updated state with the anonymized question and mapping.
+        包含匿名化问题及映射关系的更新状态.
     """
     state["curr_state"] = "anonymize_question"
-    print("state['question']: ", state['question'])
+    print("state['question']: ", state["question"])
     print("Anonymizing question")
     pprint("--------------------")
-    input_values = {"question": state['question']}
+    input_values = {"question": state["question"]}
     anonymized_question_output = anonymize_question_chain.invoke(input_values)
-    print(f'anonymized_question_output: {anonymized_question_output}')
+    print(f"anonymized_question_output: {anonymized_question_output}")
     anonymized_question = anonymized_question_output["anonymized_question"]
-    print(f'anonimized_querry: {anonymized_question}')
+    print(f"anonimized_querry: {anonymized_question}")
     pprint("--------------------")
     mapping = anonymized_question_output["mapping"]
     state["anonymized_question"] = anonymized_question
@@ -1008,32 +1278,44 @@ def anonymize_queries(state: PlanExecute):
 def deanonymize_queries(state: PlanExecute):
     """
     De-anonymizes the plan.
+    对计划执行去匿名化还原.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The updated state with the de-anonymized plan.
+        包含去匿名化计划的更新状态.
     """
     state["curr_state"] = "de_anonymize_plan"
     print("De-anonymizing plan")
     pprint("--------------------")
-    deanonimzed_plan = de_anonymize_plan_chain.invoke({"plan": state["plan"], "mapping": state["mapping"]})
+    deanonimzed_plan = de_anonymize_plan_chain.invoke(
+        {"plan": state["plan"], "mapping": state["mapping"]}
+    )
     state["plan"] = deanonimzed_plan.plan
-    print(f'de-anonimized_plan: {deanonimzed_plan.plan}')
+    print(f"de-anonimized_plan: {deanonimzed_plan.plan}")
     return state
 
 
 def plan_step(state: PlanExecute):
     """
     Plans the next step.
+    规划下一步动作.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The updated state with the plan.
+        包含更新后计划的状态.
     """
     state["curr_state"] = "planner"
     print("Planning step")
     pprint("--------------------")
-    plan = planner.invoke({"question": state['anonymized_question']})
+    plan = planner.invoke({"question": state["anonymized_question"]})
     state["plan"] = plan.steps
     print(f'plan: {state["plan"]}')
     return state
@@ -1042,10 +1324,15 @@ def plan_step(state: PlanExecute):
 def break_down_plan_step(state: PlanExecute):
     """
     Breaks down the plan steps into retrievable or answerable tasks.
+    将计划步骤拆分为可检索或可回答的任务.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The updated state with the refined plan.
+        包含细化后计划的更新状态.
     """
     state["curr_state"] = "break_down_plan"
     print("Breaking down plan steps into retrievable or answerable tasks")
@@ -1055,19 +1342,28 @@ def break_down_plan_step(state: PlanExecute):
     return state
 
 
-
 def replan_step(state: PlanExecute):
     """
     Replans the next step.
+    对后续步骤进行重规划.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         The updated state with the plan.
+        包含更新后计划的状态.
     """
     state["curr_state"] = "replan"
     print("Replanning step")
     pprint("--------------------")
-    inputs = {"question": state["question"], "plan": state["plan"], "past_steps": state["past_steps"], "aggregated_context": state["aggregated_context"]}
+    inputs = {
+        "question": state["question"],
+        "plan": state["plan"],
+        "past_steps": state["past_steps"],
+        "aggregated_context": state["aggregated_context"],
+    }
     plan = replanner.invoke(inputs)
     state["plan"] = plan.steps
     return state
@@ -1076,10 +1372,15 @@ def replan_step(state: PlanExecute):
 def can_be_answered(state: PlanExecute):
     """
     Determines if the question can be answered.
+    判断当前问题是否已经可回答.
     Args:
+        参数:
         state: The current state of the plan execution.
+        state:计划执行的当前状态.
     Returns:
+        返回:
         whether the original question can be answered or not.
+        原始问题是否能够被回答.
     """
     state["curr_state"] = "can_be_answered_already"
     print("Checking if the ORIGINAL QUESTION can be answered already")
@@ -1101,67 +1402,99 @@ def can_be_answered(state: PlanExecute):
         return "cannot_be_answered_yet"
 
 
-
 def create_agent():
-    
+
     agent_workflow = StateGraph(PlanExecute)
 
     # Add the anonymize node
+    # 添加匿名化节点
     agent_workflow.add_node("anonymize_question", anonymize_queries)
 
     # Add the plan node
+    # 添加规划节点
     agent_workflow.add_node("planner", plan_step)
 
     # Add the break down plan node
+    # 添加计划拆解节点
 
     agent_workflow.add_node("break_down_plan", break_down_plan_step)
 
     # Add the deanonymize node
+    # 添加去匿名化节点
     agent_workflow.add_node("de_anonymize_plan", deanonymize_queries)
 
     # Add the qualitative chunks retrieval node
-    agent_workflow.add_node("retrieve_chunks", run_qualitative_chunks_retrieval_workflow)
+    # 添加定性分块检索节点
+    agent_workflow.add_node(
+        "retrieve_chunks", run_qualitative_chunks_retrieval_workflow
+    )
 
     # Add the qualitative summaries retrieval node
-    agent_workflow.add_node("retrieve_summaries", run_qualitative_summaries_retrieval_workflow)
+    # 添加定性摘要检索节点
+    agent_workflow.add_node(
+        "retrieve_summaries", run_qualitative_summaries_retrieval_workflow
+    )
 
     # Add the qualitative book quotes retrieval node
-    agent_workflow.add_node("retrieve_book_quotes", run_qualitative_book_quotes_retrieval_workflow)
-
+    # 添加定性书摘检索节点
+    agent_workflow.add_node(
+        "retrieve_book_quotes", run_qualitative_book_quotes_retrieval_workflow
+    )
 
     # Add the qualitative answer node
+    # 添加定性回答节点
     agent_workflow.add_node("answer", run_qualtative_answer_workflow)
 
     # Add the task handler node
+    # 添加任务处理节点
     agent_workflow.add_node("task_handler", run_task_handler_chain)
 
     # Add a replan node
+    # 添加重规划节点
     agent_workflow.add_node("replan", replan_step)
 
     # Add answer from context node
-    agent_workflow.add_node("get_final_answer", run_qualtative_answer_workflow_for_final_answer)
+    # 添加基于上下文生成最终答案的节点
+    agent_workflow.add_node(
+        "get_final_answer", run_qualtative_answer_workflow_for_final_answer
+    )
 
     # Set the entry point
+    # 设置入口节点
     agent_workflow.set_entry_point("anonymize_question")
 
     # From anonymize we go to plan
+    # 从匿名化流转到规划
     agent_workflow.add_edge("anonymize_question", "planner")
 
     # From plan we go to deanonymize
+    # 从规划流转到去匿名化
     agent_workflow.add_edge("planner", "de_anonymize_plan")
 
     # From deanonymize we go to break down plan
+    # 从去匿名化流转到计划拆解
 
     agent_workflow.add_edge("de_anonymize_plan", "break_down_plan")
 
     # From break_down_plan we go to task handler
+    # 从计划拆解流转到任务处理
     agent_workflow.add_edge("break_down_plan", "task_handler")
 
     # From task handler we go to either retrieve or answer
-    agent_workflow.add_conditional_edges("task_handler", retrieve_or_answer, {"chosen_tool_is_retrieve_chunks": "retrieve_chunks", "chosen_tool_is_retrieve_summaries":
-                                                                            "retrieve_summaries", "chosen_tool_is_retrieve_quotes": "retrieve_book_quotes", "chosen_tool_is_answer": "answer"})
+    # 从任务处理流转到检索或回答
+    agent_workflow.add_conditional_edges(
+        "task_handler",
+        retrieve_or_answer,
+        {
+            "chosen_tool_is_retrieve_chunks": "retrieve_chunks",
+            "chosen_tool_is_retrieve_summaries": "retrieve_summaries",
+            "chosen_tool_is_retrieve_quotes": "retrieve_book_quotes",
+            "chosen_tool_is_answer": "answer",
+        },
+    )
 
     # After retrieving we go to replan
+    # 检索后进入重规划
     agent_workflow.add_edge("retrieve_chunks", "replan")
 
     agent_workflow.add_edge("retrieve_summaries", "replan")
@@ -1169,14 +1502,23 @@ def create_agent():
     agent_workflow.add_edge("retrieve_book_quotes", "replan")
 
     # After answering we go to replan
+    # 回答后进入重规划
     agent_workflow.add_edge("answer", "replan")
 
     # After replanning we check if the question can be answered, if yes we go to get_final_answer, if not we go to task_handler
-    agent_workflow.add_conditional_edges("replan",can_be_answered, {"can_be_answered_already": "get_final_answer", "cannot_be_answered_yet": "break_down_plan"})
+    # 重规划后检查问题是否可回答:可回答则进入最终回答,否则返回计划拆解
+    agent_workflow.add_conditional_edges(
+        "replan",
+        can_be_answered,
+        {
+            "can_be_answered_already": "get_final_answer",
+            "cannot_be_answered_yet": "break_down_plan",
+        },
+    )
 
     # After getting the final answer we end
+    # 得到最终答案后结束流程
     agent_workflow.add_edge("get_final_answer", END)
-
 
     plan_and_execute_app = agent_workflow.compile()
 
