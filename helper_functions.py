@@ -1,12 +1,10 @@
 import tiktoken
-import re 
+import re
 from langchain.docstore.document import Document
 import PyPDF2
 import pylcs
 import pandas as pd
 import textwrap
-
-
 
 
 def num_tokens_from_string(string: str, encoding_name: str) -> int:
@@ -38,8 +36,11 @@ def replace_t_with_space(list_of_documents):
     """
 
     for doc in list_of_documents:
-        doc.page_content = doc.page_content.replace('\t', ' ')  # Replace tabs with spaces
+        doc.page_content = doc.page_content.replace(
+            "\t", " "
+        )  # Replace tabs with spaces
     return list_of_documents
+
 
 def replace_double_lines_with_one_line(text):
     """
@@ -52,7 +53,9 @@ def replace_double_lines_with_one_line(text):
         The text string with double newlines replaced by single newlines.
     """
 
-    cleaned_text = re.sub(r'\n\n', '\n', text)  # Replace double newlines with single newlines
+    cleaned_text = re.sub(
+        r"\n\n", "\n", text
+    )  # Replace double newlines with single newlines
     return cleaned_text
 
 
@@ -67,7 +70,7 @@ def split_into_chapters(book_path):
         list: A list of Document objects, each representing a chapter with its text content and chapter number metadata.
     """
 
-    with open(book_path, 'rb') as pdf_file:
+    with open(book_path, "rb") as pdf_file:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         documents = pdf_reader.pages  # Get all pages from the PDF
 
@@ -75,13 +78,15 @@ def split_into_chapters(book_path):
         text = " ".join([doc.extract_text() for doc in documents])
 
         # Split text into chapters based on chapter title pattern (adjust as needed)
-        chapters = re.split(r'(CHAPTER\s[A-Z]+(?:\s[A-Z]+)*)', text)
+        chapters = re.split(r"(CHAPTER\s[A-Z]+(?:\s[A-Z]+)*)", text)
 
         # Create Document objects with chapter metadata
         chapter_docs = []
         chapter_num = 1
         for i in range(1, len(chapters), 2):
-            chapter_text = chapters[i] + chapters[i + 1]  # Combine chapter title and content
+            chapter_text = (
+                chapters[i] + chapters[i + 1]
+            )  # Combine chapter title and content
             doc = Document(page_content=chapter_text, metadata={"chapter": chapter_num})
             chapter_docs.append(doc)
             chapter_num += 1
@@ -92,31 +97,31 @@ def split_into_chapters(book_path):
 def extract_book_quotes_as_documents(documents, min_length=50):
     quotes_as_documents = []
     # Correct pattern for quotes longer than min_length characters, including line breaks
-    quote_pattern_longer_than_min_length = re.compile(rf'“(.{{{min_length},}}?)”', re.DOTALL)
+    quote_pattern_longer_than_min_length = re.compile(
+        rf"“(.{{{min_length},}}?)”", re.DOTALL
+    )
 
     for doc in documents:
         content = doc.page_content
-        content = content.replace('\n', ' ')
+        content = content.replace("\n", " ")
         found_quotes = quote_pattern_longer_than_min_length.findall(content)
         for quote in found_quotes:
             quote_doc = Document(page_content=quote)
             quotes_as_documents.append(quote_doc)
-    
+
     return quotes_as_documents
 
 
-
 def escape_quotes(text):
-  """Escapes both single and double quotes in a string.
+    """Escapes both single and double quotes in a string.
+      转义字符串中的单引号和双引号
+    Args:
+      text: The string to escape.
 
-  Args:
-    text: The string to escape.
-
-  Returns:
-    The string with single and double quotes escaped.
-  """
-  return text.replace('"', '\\"').replace("'", "\\'")
-
+    Returns:
+      The string with single and double quotes escaped.
+    """
+    return text.replace('"', '\\"').replace("'", "\\'")
 
 
 def text_wrap(text, width=120):
@@ -157,7 +162,7 @@ def is_similarity_ratio_lower_than_th(large_string, short_string, th):
         return True
     else:
         return False
-    
+
 
 def analyse_metric_results(results_df):
     """
@@ -176,7 +181,9 @@ def analyse_metric_results(results_df):
 
         # Print explanation and score for each metric
         if metric_name == "faithfulness":
-            print("Measures how well the generated answer is supported by the retrieved documents.")
+            print(
+                "Measures how well the generated answer is supported by the retrieved documents."
+            )
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better faithfulness.
         elif metric_name == "answer_relevancy":
@@ -184,7 +191,9 @@ def analyse_metric_results(results_df):
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better relevance.
         elif metric_name == "context_precision":
-            print("Measures the proportion of retrieved documents that are actually relevant.")
+            print(
+                "Measures the proportion of retrieved documents that are actually relevant."
+            )
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better precision (avoiding irrelevant documents).
         elif metric_name == "context_relevancy":
@@ -192,15 +201,21 @@ def analyse_metric_results(results_df):
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better relevance of retrieved documents.
         elif metric_name == "context_recall":
-            print("Measures the proportion of relevant documents that are successfully retrieved.")
+            print(
+                "Measures the proportion of relevant documents that are successfully retrieved."
+            )
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better recall (finding all relevant documents).
         elif metric_name == "context_entity_recall":
-            print("Measures the proportion of relevant entities mentioned in the question that are also found in the retrieved documents.")
+            print(
+                "Measures the proportion of relevant entities mentioned in the question that are also found in the retrieved documents."
+            )
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates better recall of relevant entities.
         elif metric_name == "answer_similarity":
-            print("Measures the semantic similarity between the generated answer and the ground truth answer.")
+            print(
+                "Measures the semantic similarity between the generated answer and the ground truth answer."
+            )
             print(f"Score: {metric_value:.4f}")
             # Interpretation: Higher score indicates closer semantic meaning between the answers.
         elif metric_name == "answer_correctness":
@@ -209,37 +224,38 @@ def analyse_metric_results(results_df):
             # Interpretation: Higher score indicates better correctness.
 
 
-
 import dill
+
 
 def save_object(obj, filename):
     """
     Save a Python object to a file using dill.
-    
+
     Args:
     - obj: The Python object to save.
     - filename: The name of the file where the object will be saved.
     """
-    with open(filename, 'wb') as file:
+    with open(filename, "wb") as file:
         dill.dump(obj, file)
     print(f"Object has been saved to '{filename}'.")
+
 
 def load_object(filename):
     """
     Load a Python object from a file using dill.
-    
+
     Args:
     - filename: The name of the file from which the object will be loaded.
-    
+
     Returns:
     - The loaded Python object.
     """
-    with open(filename, 'rb') as file:
+    with open(filename, "rb") as file:
         obj = dill.load(file)
     print(f"Object has been loaded from '{filename}'.")
     return obj
 
+
 # Example usage:
 # save_object(plan_and_execute_app, 'plan_and_execute_app.pkl')
 # plan_and_execute_app = load_object('plan_and_execute_app.pkl')
-

@@ -1,20 +1,26 @@
-from ast import List
-
+from importlib import metadata
 from pydoc import describe, doc
 from re import search, template
-from typing import TypedDict
+from typing import List, TypedDict
 
 from fsspec import mapping
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.graph import StateGraph
-from pyarrow import Field
+from pydantic import Field
 from pydantic import BaseModel
 from langgraph.graph import END, StateGraph
 from langchain.vectorstores import FAISS
 
+from functions_for_pipeline import answer_question_from_context
 from helper_functions import escape_quotes
+from sophisticated_rag_agent_harry_potter import (
+    is_grounded_on_facts_prompt,
+    is_grounded_on_facts_prompt_template,
+    qualitative_answer_workflow,
+    question,
+)
 
 
 class PlanExecute(TypedDict):
@@ -65,7 +71,11 @@ def create_retrievers():
     )
 
 
-(chunks_query_retriever) = create_retrievers()
+(
+    chunks_query_retriever,
+    chapter_summaries_query_retriever,
+    book_quotes_query_retriever,
+) = create_retrievers()
 
 
 def create_plan_chain():
@@ -158,7 +168,9 @@ def create_break_down_plan_chain():
         template=break_down_plan_prompt_template, input_variables=["plan"]
     )
 
-    break_down_plan_llm = ChatOpenAI(template=0, model_name="gpt-4o", max_tokens=2000)
+    break_down_plan_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
 
     break_down_plan_chain = (
         break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
@@ -190,7 +202,7 @@ def create_task_handler_chain():
         """任务处理器的输出结构"""
 
         query: str = Field(
-            description="查询内容要么从向量存储中检索，要么是从上下文中应回答的问题。"
+            description="查询内容要么从向量存储中检索,要么是从上下文中应回答的问题。"
         )
         curr_context: str = Field(description="为回答该问题而需依据的上下文。")
         tool: str = Field(
@@ -236,6 +248,120 @@ def retrieve_chunks_context_per_question(state):
     return {"context": context, "question": question}
 
 
+def create_keep_only_relevant_content_chain():
+    keep_only_relevant_content_prompt_template = """您收到一个查询:{query},并从a中检索到文档:{retrieved_documents}”
+    向量存储。
+    你需要过滤掉所有与{query}无关且无法提供重要信息的非相关信息。
+    你的目标只是过滤掉不相关的信息。
+    你可以删除句子中与查询无关的部分,或者删除与查询无关的整个句子。
+    请勿添加任何未包含在检索到的文件中的新信息。
+    输出经过过滤的相关内容。"""
+
+    class KeepRelevantContent(BaseModel):
+        relevant_content: str = Field(
+            description="从检索到的文档中提取的与查询相关的内容。"
+        )
+
+    keep_only_relevant_content_prompt = PromptTemplate(
+        template=keep_only_relevant_content_prompt_template,
+        input_variables=["query", "retrieved_documents"],
+    )
+
+    keep_only_relevant_content_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+
+    keep_only_relevant_content_chain = (
+        keep_only_relevant_content_prompt
+        | keep_only_relevant_content_llm.with_structured_output(KeepRelevantContent)
+    )
+
+    return keep_only_relevant_content_chain
+
+
+keep_only_relevant_content_chain = create_keep_only_relevant_content_chain()
+
+
+def keep_only_relevant_content(state):
+    """仅保留检索文档中与查询相关的内容"""
+    question = state["question"]
+    context = state["context"]
+
+    input_data = {"query": question, "retrieved_documents": context}
+    output = keep_only_relevant_content_chain.invoke(input_data)
+
+    relevant_content = output.relevant_content
+    relevant_content = "".join(relevant_content)
+    relevant_content = escape_quotes(relevant_content)
+
+    return {
+        "relevant_context": relevant_content,
+        "context": context,
+        "question": question,
+    }
+
+
+def create_is_distilled_content_grounded_on_content_chain():
+    is_distilled_content_grounded_on_content_prompt_template = """您将收到一些提炼的内容：{distilled_content} 以及原始上下文：{original_context}。
+        你需要判断提炼的内容是否基于原始上下文。
+        如果提取的内容基于原始上下文,则将基于上下文字段设置为true。
+        如果提取的内容未基于原始上下文,则将基于上下文字段设置为false。"""
+
+    class IsDistilledContentGroundedOnContent(BaseModel):
+        grounded: bool = Field(description="提炼的内容是否基于原始上下文。")
+        explanation: str = Field(
+            description="解释为何提炼的内容基于或未基于原始上下文。"
+        )
+
+    is_distilled_content_grounded_on_content_prompt = PromptTemplate(
+        template=is_distilled_content_grounded_on_content_prompt_template,
+        input_variables=["distilled_content", "original_context"],
+    )
+
+    is_distilled_content_grounded_on_content_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+
+    is_distilled_content_grounded_on_content_chain = (
+        is_distilled_content_grounded_on_content_prompt
+        | is_distilled_content_grounded_on_content_llm.with_structured_output(
+            IsDistilledContentGroundedOnContent
+        )
+    )
+
+    return is_distilled_content_grounded_on_content_chain
+
+
+is_distilled_content_grounded_on_content_chain = (
+    create_is_distilled_content_grounded_on_content_chain()
+)
+
+
+def is_distilled_content_grounded_on_content(state):
+    """
+    判断提炼后的内容是否基于原始上下文
+
+    Args:
+    distilled_content:提炼后的内容.
+    original_context:原始上下文.
+    """
+    distilled_content = state["relevant_context"]
+    original_context = state["context"]
+
+    input_data = {
+        "distilled_content": distilled_content,
+        "original_context": original_context,
+    }
+
+    output = is_distilled_content_grounded_on_content_chain.invoke(input_data)
+    grounded = output.grounded
+
+    if grounded:
+        return "基于原始语境"
+    else:
+        return "不基于原始语境"
+
+
 def create_qualitative_retrieval_book_chunks_workflow_app():
     """构建并编译一个用于“定性检索书本切片(chunks)”的工作流应用"""
 
@@ -274,14 +400,179 @@ def create_qualitative_retrieval_book_chunks_workflow_app():
     return qualitative_chunks_retrieval_workflow_app
 
 
+def retrieve_summaries_context_per_question(state):
+    """按问题检索摘要上下文"""
+    question = state["question"]
+    docs_summaries = chapter_summaries_query_retriever.get_relevant_documents(
+        state["question"]
+    )
+
+    # 拼接章节摘要并附带引用信息
+    context_summaries = " ".join(
+        f"{doc.page_conte} (chapter {doc.metadata['chapter']})"
+        for doc in docs_summaries
+    )
+    context_summaries = escape_quotes(context_summaries)
+    return {"context": context_summaries, "question": question}
+
+
+def create_qualitative_summaries_retrieval_workflow_app():
+    qualitative_summaries_retrieval_workflow = StateGraph(
+        QualitativeRetrievalGraphState
+    )
+    # 定义节点
+    qualitative_summaries_retrieval_workflow.add_node(
+        "retrieve_summaries_context_per_question",
+        retrieve_summaries_context_per_question,
+    )
+    qualitative_summaries_retrieval_workflow.add_node(
+        "keep_only_relevant_content", keep_only_relevant_content
+    )
+
+    # 构建图
+    qualitative_summaries_retrieval_workflow.set_entry_point(
+        "retrieve_summaries_context_per_question"
+    )
+
+    qualitative_summaries_retrieval_workflow.add_edge(
+        "retrieve_summaries_context_per_question", "keep_only_relevant_content"
+    )
+    qualitative_summaries_retrieval_workflow.add_conditional_edges(
+        "keep_only_relevant_content",
+        is_distilled_content_grounded_on_content,
+        {"基于原始语境": END, "不基于原始语境": "keep_only_relevant_content"},
+    )
+
+
+def retrieve_book_quotes_context_per_question(state):
+    """检索每个问题的书籍报价上下文"""
+    question = state["question"]
+    docs_book_quotes = book_quotes_query_retriever.get_relevant_documents(
+        state["question"]
+    )
+    book_quotes = " ".join(doc.page_content for doc in docs_book_quotes)
+    book_quotes_content = escape_quotes(book_quotes)
+
+    return {"context": book_quotes_content, "question": question}
+
+
+def create_qualitative_book_quotes_retrieval_workflow_app():
+    qualitative_book_quotes_retrieval_workflow = StateGraph(
+        QualitativeRetrievalGraphState
+    )
+
+    # 定义节点
+    qualitative_book_quotes_retrieval_workflow.add_node(
+        "retrieve_book_quotes_context_per_question",
+        retrieve_book_quotes_context_per_question,
+    )
+    qualitative_book_quotes_retrieval_workflow.add_node(
+        "keep_only_relevant_content", keep_only_relevant_content
+    )
+
+    # 构建图
+    qualitative_book_quotes_retrieval_workflow.set_entry_point(
+        "retrieve_book_quotes_context_per_question"
+    )
+
+    qualitative_book_quotes_retrieval_workflow.add_edge(
+        "retrieve_book_quotes_context_per_question", "keep_only_relevant_content"
+    )
+
+    qualitative_book_quotes_retrieval_workflow.add_conditional_edges(
+        "keep_only_relevant_content",
+        is_distilled_content_grounded_on_content,
+        {"基于原始语境": END, "不基于原始语境": "keep_only_relevant_content"},
+    )
+
+
+def create_is_grounded_on_facts_chain():
+    class is_grounded_on_facts(BaseModel):
+        # 重写问题的输出结构定义
+        grounded_on_facts: bool = Field(description="答案基于事实,“是”或“否”")
+
+    is_grounded_on_facts_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    is_grounded_on_facts_prompt_template = """你是一名事实核查员,负责判断给定答案{answer}是否基于给定上下文{context}
+    只要它基于上下文,即使没有意义,你也不介意。
+    输出一个包含问题答案的JSON格式数据,除了JSON格式的数据外,不要输出任何额外的文本。
+    """
+
+    is_grounded_on_facts_prompt = PromptTemplate(
+        template=is_grounded_on_facts_prompt_template,
+        input_variables=["context", "answer"],
+    )
+
+    is_grounded_on_facts_chain = (
+        is_grounded_on_facts_prompt
+        | is_grounded_on_facts_llm.with_structured_output(is_grounded_on_facts)
+    )
+
+    return is_grounded_on_facts_chain
+
+
+is_grounded_on_facts_chain = create_is_grounded_on_facts_chain()
+
+
+def is_answer_grounded_on_context(state):
+    # 判断问题答案是否基于事实
+    context = state["context"]
+    answer = state["answer"]
+
+    result = is_grounded_on_facts_chain.invoke({"context": context, "answer": answer})
+
+    grounded_on_facts = result.grounded_on_facts
+
+    if not grounded_on_facts:
+        return "幻觉"
+    else:
+        return "基于上下文"
+
+
+def create_qualitative_answer_workflow_app():
+    class QualitativeAnswerGraphState(TypedDict):
+        # 表示当前图工作流的状态结构
+        question: str
+        context: str
+        answer: str
+
+    qualitative_answer_workflow = StateGraph(QualitativeAnswerGraphState)
+
+    # 定义节点
+
+    qualitative_answer_workflow.add_node(
+        "answer_question_from_context", answer_question_from_context
+    )
+
+    # 构建图
+    qualitative_answer_workflow.set_entry_point("answer_question_from_context")
+
+    qualitative_answer_workflow.add_conditional_edges(
+        "answer_question_from_context",
+        is_answer_grounded_on_context,
+        {"幻觉": "answer_question_from_context", "基于上下文": END},
+    )
+
+    qualitative_answer_workflow_app = qualitative_answer_workflow.compile()
+    return qualitative_answer_workflow_app
+
+
 anonymize_question_chain = create_anonymize_question_chain()
-planner = create_plan_chain
+planner = create_plan_chain()
 de_anonymize_plan_chain = create_deanonymize_plan_chain()
 break_down_plan_chain = create_break_down_plan_chain()
 task_handler_chain = create_task_handler_chain()
 qualitative_chunks_retrieval_workflow_app = (
     create_qualitative_retrieval_book_chunks_workflow_app()
 )
+qualitative_summaries_retrieval_workflow_app = (
+    create_qualitative_summaries_retrieval_workflow_app()
+)
+qualitative_book_quotes_retrieval_workflow_app = (
+    create_qualitative_book_quotes_retrieval_workflow_app()
+)
+qualitative_answer_workflow_app = create_qualitative_answer_workflow_app()
 
 
 def anonymize_queries(state: PlanExecute):
@@ -389,6 +680,52 @@ def run_qualitative_chunks_retrieval_workflow(state):
     return state
 
 
+def run_qualitative_summaries_retrieval_workflow(state):
+    """运行定性摘要检索工作流"""
+    state["curr_state"] = "retrieve_summaries"
+    question = state["query_to_retrieve_or_answer"]
+    inputs = {"question": question}
+    for output in qualitative_summaries_retrieval_workflow_app.stream(inputs):
+        for _, _ in output.items():
+            pass
+    if not state["aggregated_context"]:
+        state["aggregated_context"] = ""
+    state["aggregated_context"] += output["relevant_context"]
+    return state
+
+
+def run_qualitative_book_quotes_retrieval_workflow(state):
+    """运行定性书摘检索工作流"""
+    state["curr_state"] = "retrieve_book_quotes"
+    question = state["query_to_retrieve_or_answer"]
+    inputs = {"question": question}
+    for output in qualitative_book_quotes_retrieval_workflow_app.stream(inputs):
+        for _, _ in output.item():
+            pass
+    if not state["aggregated_context"]:
+        state["aggregated_context"] = ""
+    state["aggregated_context"] += output["aggregated_context"]
+    return state
+
+
+def run_qualtative_answer_workflow(state):
+    """运行定性回答工作流"""
+    state["curr_state"] = "answer"
+    question = state["query_to_retrieve_or answer"]
+    context = state["curr_context"]
+    inputs = {"question": question, "context": context}
+
+    for output in qualitative_answer_workflow_app.stream(inputs):
+        for _, _ in output.items():
+            pass
+
+    if not state["aggregated_context"]:
+        state["aggregated_context"] = ""
+    state["aggregated_context"] += output["answer"]
+
+    return state
+
+
 def create_agent():
     agent_workflow = StateGraph(PlanExecute)
     # 添加匿名化节点
@@ -405,6 +742,16 @@ def create_agent():
     agent_workflow.add_node(
         "retrieve_chunks", run_qualitative_chunks_retrieval_workflow
     )
+    # 添加定性摘要检查节点
+    agent_workflow.add_node(
+        "retrieve_summaries", run_qualitative_summaries_retrieval_workflow
+    )
+    # 添加定性书摘检索节点
+    agent_workflow.add_node(
+        "retrieve_book_quotes", run_qualitative_book_quotes_retrieval_workflow
+    )
+    # 添加定性回答节点
+    agent_workflow.add_node("answer", run_qualtative_answer_workflow)
 
     # 设置入口节点
     agent_workflow.set_entry_point("anonymize_question")
