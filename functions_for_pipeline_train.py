@@ -13,14 +13,9 @@ from pydantic import BaseModel
 from langgraph.graph import END, StateGraph
 from langchain.vectorstores import FAISS
 
+from full_graph_visualization import plan_and_execute_app
 from functions_for_pipeline import answer_question_from_context
 from helper_functions import escape_quotes
-from sophisticated_rag_agent_harry_potter import (
-    is_grounded_on_facts_prompt,
-    is_grounded_on_facts_prompt_template,
-    qualitative_answer_workflow,
-    question,
-)
 
 
 class PlanExecute(TypedDict):
@@ -531,6 +526,7 @@ def is_answer_grounded_on_context(state):
 
 
 def create_qualitative_answer_workflow_app():
+    # 根据context回答question,然后基于上下文,检查是否有幻觉,有,重新生产,无,结束
     class QualitativeAnswerGraphState(TypedDict):
         # 表示当前图工作流的状态结构
         question: str
@@ -558,6 +554,64 @@ def create_qualitative_answer_workflow_app():
     return qualitative_answer_workflow_app
 
 
+def create_replanner_chain():
+    replanner_prompt_template = """针对给定的目标,制定一个简单的分步计划,说明如何得出答案。
+    该计划应包含各项单独的任务,若执行得当,便能得出正确答案。请勿添加任何多余的步骤。 
+    最后一步的结果应该是最终答案。确保每一步都包含了所有必要的信息——不要跳过任何步骤。
+    假设答案尚未找到,你需要相应地更新计划,因此计划绝不能为空。
+    你的目标是这样的：
+    {question}
+    你最初的计划是这样的：
+    {计划}
+    您目前已经完成了以下步骤：
+    {past_steps}
+    您已经掌握了以下上下文：
+    {聚合上下文}
+    相应地更新你的计划。如果需要采取进一步的措施,只需在计划中填写这些措施。
+    不要将之前已完成的步骤作为计划的一部分再次提交。
+    格式为json,因此需要转义双引号和换行符。"""
+
+    replanner_prompt = PromptTemplate(
+        template=replanner_prompt_template,
+        input_variables=["question", "plan", "past_steps", "aggregated_context"],
+    )
+
+    replanner_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+
+    replanner = replanner_prompt | replanner_llm.with_structured_output(Plan)
+
+    return replanner
+
+
+def create_can_be_answered_already_chain():
+    class CanBeAnsweredAlready(BaseModel):
+        # 该动作可能产生的结果
+        can_be_answered: bool = Field(
+            description="根据给定的上下文,这个问题是否能得到完全的回答。"
+        )
+
+    can_be_answered_already_prompt_template = """
+    你收到一个查询：{question},以及一个上下文：{context}。
+    你需要判断是否仅凭给定的上下文就能完整回答这个问题。
+    你唯一能依赖的信息就是你所接收到的上下文。 
+    你对这个问题或上下文没有先前的了解。
+    如果你认为这个问题可以根据上下文来回答,请输出“true”,否则输出“false”。
+    """
+
+    can_be_answered_already_prompt = PromptTemplate(
+        template=can_be_answered_already_prompt_template,
+        input_variables=["question", "context"],
+    )
+    can_be_answered_already_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000
+    )
+    can_be_answered_already_chain = (
+        can_be_answered_already_prompt
+        | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready)
+    )
+    return can_be_answered_already_chain
+
+
 anonymize_question_chain = create_anonymize_question_chain()
 planner = create_plan_chain()
 de_anonymize_plan_chain = create_deanonymize_plan_chain()
@@ -573,6 +627,8 @@ qualitative_book_quotes_retrieval_workflow_app = (
     create_qualitative_book_quotes_retrieval_workflow_app()
 )
 qualitative_answer_workflow_app = create_qualitative_answer_workflow_app()
+replanner = create_replanner_chain()
+can_be_answered_already_chain = create_can_be_answered_already_chain()
 
 
 def anonymize_queries(state: PlanExecute):
@@ -726,6 +782,46 @@ def run_qualtative_answer_workflow(state):
     return state
 
 
+def replan_step(state: PlanExecute):
+    """对后续步骤进行重规划"""
+    state["curr_state"] = "replan"
+    inputs = {
+        "question": state["question"],
+        "plan": state["plan"],
+        "past_steps": state["past_steps"],
+        "aggregated_context": state["aggregated_context"],
+    }
+    plan = replanner.invoke(inputs)
+    state["plan"] = plan.steps
+    return state
+
+
+def run_qualtative_answer_workflow_for_final_answer(state):
+    # 运行用于生产最终答案的定性回答工作流
+    state["curr_state"] = "get_final_answer"
+    question = state["question"]
+    context = state["aggregated_context"]
+    inputs = {"question": question, "context": context}
+    for output in qualitative_answer_workflow_app.stream(inputs):
+        for _, value in output.items():
+            pass
+    state["response"] = value
+    return state
+
+
+def can_be_answered(state: PlanExecute):
+    # 判断当前问题是否已经可回答
+    state["curr_state"] = "can_be_answered_already"
+    question = state["question"]
+    context = state["aggregated_context"]
+    inputs = {"question": question, "context": context}
+    output = can_be_answered_already_chain.invoke(inputs)
+    if output.can_be_answered == True:
+        return "can_be_answered_already"
+    else:
+        return "cannot_be_answered_yet"
+
+
 def create_agent():
     agent_workflow = StateGraph(PlanExecute)
     # 添加匿名化节点
@@ -752,6 +848,14 @@ def create_agent():
     )
     # 添加定性回答节点
     agent_workflow.add_node("answer", run_qualtative_answer_workflow)
+    # 添加重规划节点
+    agent_workflow.add_node("replan", replan_step)
+    # 添加基于上下文生成最终答案的节点
+    agent_workflow.add_node(
+        "get_final_answer", run_qualtative_answer_workflow_for_final_answer
+    )
+    # 添加计划拆解节点
+    agent_workflow.add_node("break_down_plan", break_down_plan_step)
 
     # 设置入口节点
     agent_workflow.set_entry_point("anonymize_question")
@@ -775,3 +879,27 @@ def create_agent():
             "chosen_tool_is_answer": "answer",
         },
     )
+
+    # 检索后进入重规划
+    agent_workflow.add_edge("retrieve_chunks", "replan")
+    agent_workflow.add_edge("retrieve_summaries", "replan")
+    agent_workflow.add_edge("retrieve_book_quotes", "replan")
+    # 回答后进入重规划
+    agent_workflow.add_edge("answer", "replan")
+
+    # 重规划后检查问题是否可回答：可回答则进入最终回答,否则返回计划拆解
+    agent_workflow.add_conditional_edges(
+        "replan",
+        can_be_answered,
+        {
+            "con_be_answered_already": "get_final_answer",
+            "cannot_be_answered_yet": "break_down_plan",
+        },
+    )
+
+    # 得到最终答案后结束流程
+    agent_workflow.add_edge("get_final_answer,END")
+
+    plan_and_execute_app = agent_workflow.compile()
+
+    return plan_and_execute_app
