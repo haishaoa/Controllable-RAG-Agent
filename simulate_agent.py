@@ -167,7 +167,8 @@ def execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, gra
             step += 1
             for _, agent_state_value in plan_output.items():
                 previous_values, previous_state = update_placeholders_and_graph(
-                    agent_state_value, placeholders, graph_placeholder, previous_values, previous_state
+                    agent_state_value, placeholders, graph_placeholder, 
+                    previous_values, previous_state
                 )
 
                 progress_bar.progress(step / recursion_limit)

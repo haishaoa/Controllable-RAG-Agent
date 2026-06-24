@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from langgraph.graph import END, StateGraph
 from langchain.vectorstores import FAISS
 
-from full_graph_visualization import plan_and_execute_app
 from functions_for_pipeline import answer_question_from_context
 from helper_functions import escape_quotes
 
@@ -52,7 +51,8 @@ def create_retrievers():
         "book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True
     )
 
-    chunks_query_retriever = chunks_vector_store.as_retriever(search_kwargs={"k": 1})
+    chunks_query_retriever = chunks_vector_store.as_retriever(search_kwargs={
+                                                              "k": 1})
     chapter_summaries_query_retriever = chapter_summaries_vector_store.as_retriever(
         search_kwargs={"k": 1}
     )
@@ -69,7 +69,7 @@ def create_retrievers():
 (
     chunks_query_retriever,
     chapter_summaries_query_retriever,
-    book_quotes_query_retriever,
+    book_quotes_query_retriever
 ) = create_retrievers()
 
 
@@ -82,7 +82,8 @@ def create_plan_chain():
     planner_prompt = PromptTemplate(
         template=planner_prompt, input_variables=["question"]
     )
-    planner_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+    planner_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000)
     planner = planner_prompt | planner_llm.with_structured_output(Plan)
     return planner
 
@@ -95,7 +96,8 @@ def create_anonymize_question_chain():
         mapping: dict = Field(description="将原始名称实体映射到变量。")
         explanation: str = Field(description="动作说明")
 
-    anonymize_question_parser = JsonOutputParser(pydantic_object=AnonymizeQuestion)
+    anonymize_question_parser = JsonOutputParser(
+        pydantic_object=AnonymizeQuestion)
     anonymize_question_prompt_template = """你是一个问题匿名化工具。你接收到的输入是一个包含多个单词的字符串
     构造一个问题{question}。你的目标是将输入中的所有名称实体替换为变量,并记住原始名称实体到变量的映射关系。
     ```example1:
@@ -135,7 +137,8 @@ def create_deanonymize_plan_chain():
     返回原始任务列表。在任何情况下,只需按照此处所述的json格式输出更新后的任务列表,除“[原文内容]”外,不添加任何其他文本"""
 
     de_anonymize_plan_prompt = PromptTemplate(
-        template=de_anonymize_plan_prompt_template, input_variables=["plan", "mapping"]
+        template=de_anonymize_plan_prompt_template, input_variables=[
+            "plan", "mapping"]
     )
 
     de_anonymize_plan_llm = ChatOpenAI(
@@ -164,11 +167,11 @@ def create_break_down_plan_chain():
     )
 
     break_down_plan_llm = ChatOpenAI(
-        temperature=0, model_name="gpt-4o", max_tokens=2000
-    )
+        template=0, model_name="gpt-4o", max_tokens=2000)
 
     break_down_plan_chain = (
-        break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
+        break_down_plan_prompt | break_down_plan_llm.with_structured_output(
+            Plan)
     )
 
     return break_down_plan_chain
@@ -215,7 +218,8 @@ def create_task_handler_chain():
         ],
     )
 
-    task_handler_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+    task_handler_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000)
     task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(
         TaskHandlerOutput
     )
@@ -361,7 +365,8 @@ def create_qualitative_retrieval_book_chunks_workflow_app():
     """构建并编译一个用于“定性检索书本切片(chunks)”的工作流应用"""
 
     # 初始化工作流图
-    qualitative_chunks_retrieval_workflow = StateGraph(QualitativeRetrievalGraphState)
+    qualitative_chunks_retrieval_workflow = StateGraph(
+        QualitativeRetrievalGraphState)
     # 根据问题检索书本的切片上下文
     qualitative_chunks_retrieval_workflow.add_node(
         "retrieve_chunks_context_per_question", retrieve_chunks_context_per_question
@@ -515,7 +520,8 @@ def is_answer_grounded_on_context(state):
     context = state["context"]
     answer = state["answer"]
 
-    result = is_grounded_on_facts_chain.invoke({"context": context, "answer": answer})
+    result = is_grounded_on_facts_chain.invoke(
+        {"context": context, "answer": answer})
 
     grounded_on_facts = result.grounded_on_facts
 
@@ -573,10 +579,12 @@ def create_replanner_chain():
 
     replanner_prompt = PromptTemplate(
         template=replanner_prompt_template,
-        input_variables=["question", "plan", "past_steps", "aggregated_context"],
+        input_variables=["question", "plan",
+                         "past_steps", "aggregated_context"],
     )
 
-    replanner_llm = ChatOpenAI(temperature=0, model_name="gpt-4o", max_tokens=2000)
+    replanner_llm = ChatOpenAI(
+        temperature=0, model_name="gpt-4o", max_tokens=2000)
 
     replanner = replanner_prompt | replanner_llm.with_structured_output(Plan)
 
@@ -854,8 +862,8 @@ def create_agent():
     agent_workflow.add_node(
         "get_final_answer", run_qualtative_answer_workflow_for_final_answer
     )
-    # 添加计划拆解节点
-    agent_workflow.add_node("break_down_plan", break_down_plan_step)
+    # # 添加计划拆解节点
+    # agent_workflow.add_node("break_down_plan", break_down_plan_step)
 
     # 设置入口节点
     agent_workflow.set_entry_point("anonymize_question")
@@ -898,7 +906,7 @@ def create_agent():
     )
 
     # 得到最终答案后结束流程
-    agent_workflow.add_edge("get_final_answer,END")
+    agent_workflow.add_edge("get_final_answer", END)
 
     plan_and_execute_app = agent_workflow.compile()
 
